@@ -4,6 +4,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.layers import (
     DropPath,
@@ -23,6 +24,8 @@ from timm.models import (
 )
 from torch import Tensor
 from torch.jit import Final
+
+from .mamba_ssm import Mamba
 
 __all__ = ["MetaFormer"]
 
@@ -272,6 +275,63 @@ class SSM(nn.Module):
 
         x = self.proj(x)
         x = self.proj_drop(x)
+        return x
+
+
+class Hydra(nn.Module):
+    fused_attn: Final[bool]
+
+    def __init__(
+        self,
+        dim,
+        head_dim=32,
+        num_heads=4,
+        qkv_bias=False,
+        attn_drop=0.0,
+        proj_drop=0.0,
+        proj_bias=False,
+        **kwargs,
+    ):
+        super().__init__()
+
+        self.head_dim = head_dim
+        self.scale = head_dim**-0.5
+        self.fused_attn = False  # use_fused_attn()
+
+        self.num_heads = num_heads if num_heads else dim // head_dim
+        if self.num_heads == 0:
+            self.num_heads = 1
+
+        self.attention_dim = self.num_heads * self.head_dim
+
+        self.h_mamba = Mamba(dim, expand=0.75, conv_bias=qkv_bias, bias=proj_bias)
+        self.w_mamba = Mamba(dim, expand=0.75, conv_bias=qkv_bias, bias=proj_bias)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        hf, hb, wf, wb = x, x, x, x
+
+        hf = rearrange(
+            self.h_mamba(rearrange(hf, "b c h w -> (b w) h c")),
+            "(b w) h c -> b c h w",
+            b=B,
+        )
+        hb = rearrange(
+            self.h_mamba(rearrange(hb, "b c h w -> (b w) h c").flip(1)).flip(1),
+            "(b w) h c -> b c h w",
+            b=B,
+        )
+        wf = rearrange(
+            self.w_mamba(rearrange(wf, "b c h w -> (b h) w c")),
+            "(b h) w c -> b c h w",
+            b=B,
+        )
+        wb = rearrange(
+            self.w_mamba(rearrange(wb, "b c h w -> (b h) w c").flip(1)).flip(1),
+            "(b h) w c -> b c h w",
+            b=B,
+        )
+        x = hf + hb + wf + wb
         return x
 
 
@@ -1003,11 +1063,35 @@ def ssm_s18(pretrained=False, **kwargs) -> MetaFormer:
 
 
 @register_model
+def mamba_s18(pretrained=False, **kwargs) -> MetaFormer:
+    model_kwargs = dict(
+        depths=[3, 3, 9, 3],
+        dims=[64, 128, 320, 512],
+        token_mixers=[SepConv, SepConv, Hydra, Hydra],
+        norm_layers=[LayerNorm2dNoBias] * 4,
+        **kwargs,
+    )
+    return _create_metaformer("caformer_s18", pretrained=pretrained, **model_kwargs)
+
+
+@register_model
 def ssm_s36(pretrained=False, **kwargs) -> MetaFormer:
     model_kwargs = dict(
         depths=[3, 12, 18, 3],
         dims=[64, 128, 320, 512],
         token_mixers=[SepConv, SepConv, SSM, SSM],
+        norm_layers=[LayerNorm2dNoBias] * 4,
+        **kwargs,
+    )
+    return _create_metaformer("caformer_s36", pretrained=pretrained, **model_kwargs)
+
+
+@register_model
+def mamba_s36(pretrained=False, **kwargs) -> MetaFormer:
+    model_kwargs = dict(
+        depths=[3, 12, 18, 3],
+        dims=[64, 128, 320, 512],
+        token_mixers=[SepConv, SepConv, Hydra, Hydra],
         norm_layers=[LayerNorm2dNoBias] * 4,
         **kwargs,
     )
@@ -1027,11 +1111,35 @@ def ssm_m36(pretrained=False, **kwargs) -> MetaFormer:
 
 
 @register_model
+def mamba_m36(pretrained=False, **kwargs) -> MetaFormer:
+    model_kwargs = dict(
+        depths=[3, 12, 18, 3],
+        dims=[96, 192, 384, 576],
+        token_mixers=[SepConv, SepConv, Hydra, Hydra],
+        norm_layers=[LayerNorm2dNoBias] * 4,
+        **kwargs,
+    )
+    return _create_metaformer("caformer_m36", pretrained=pretrained, **model_kwargs)
+
+
+@register_model
 def ssm_b36(pretrained=False, **kwargs) -> MetaFormer:
     model_kwargs = dict(
         depths=[3, 12, 18, 3],
         dims=[128, 256, 512, 768],
         token_mixers=[SepConv, SepConv, SSM, SSM],
+        norm_layers=[LayerNorm2dNoBias] * 4,
+        **kwargs,
+    )
+    return _create_metaformer("caformer_b36", pretrained=pretrained, **model_kwargs)
+
+
+@register_model
+def mamba_b36(pretrained=False, **kwargs) -> MetaFormer:
+    model_kwargs = dict(
+        depths=[3, 12, 18, 3],
+        dims=[128, 256, 512, 768],
+        token_mixers=[SepConv, SepConv, Hydra, Hydra],
         norm_layers=[LayerNorm2dNoBias] * 4,
         **kwargs,
     )
